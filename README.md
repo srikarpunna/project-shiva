@@ -2,7 +2,7 @@
 
 **Camera-free, wearable-free home guardian.**
 
-A WiFi-sensing puck sits in a room. It detects presence, breathing, motion, and falls using radio reflections — no camera, no microphone, no wearable. A caregiver's phone shows a calm status dot and only alerts when something is genuinely wrong. The monitored person does nothing — no app, no login, no device.
+Two small sensor units plug into a home — one per main room. They detect whether someone is present, moving, resting, and breathing, using WiFi radio reflections — no camera, no microphone, no wearable. A caregiver opens a web app from anywhere in the world and sees one plain sentence: everything looks normal, or something is wrong. Alerts fire only on a real emergency — a fall, or breathing stopping while someone is present. The monitored person does nothing — no app, no login, no device.
 
 > Think **"Find My," but for *are they okay?*** instead of *where is their phone?*
 
@@ -20,6 +20,10 @@ Read these before touching any code. Violating them is a defect, not a style iss
 | Fail loud, fail safe | Unknown state = `degraded`, never false-green |
 | Degrade honestly | If still learning, the app says so |
 | No video, no audio, no location | If a feature needs these, don't build it |
+| Never count or name people | WiFi sensing knows "someone is there," not who or how many. Show "someone," never "2 people," never "Mom" |
+| Empty home is never an emergency | Families travel. Absence is shown calmly, never as an alert |
+| One product, not two personas | Watchfulness is a setting, not an identity the caregiver must understand |
+| Never imply medical-grade accuracy | Not a medical device. Copy and UI must never claim it is |
 
 ---
 
@@ -37,6 +41,37 @@ Green CI does not mean this is safe to deploy. The pipeline is built and wired. 
 
 ---
 
+## What v1 delivers (target scope — proven only after hardware)
+
+Everything below is the **intended** v1 capability. None of it is proven until real sensor data exists. Each capability stays behind `UNVALIDATED_NO_REAL_DATA` until a real device proves it on real signal. No claim here is built on assumption — it becomes true only after hardware arrives and the data backs it.
+
+**The kit:** two small sensor units per home — one per main room (e.g. bedroom + living room). One unit covers one room well. Whole-home coverage = two units.
+
+**What the caregiver sees (passive, glance):**
+
+| Capability | Confidence | Note |
+|------------|-----------|------|
+| Someone home vs empty | Strong | presence is the most reliable WiFi-sensing signal |
+| Which room | Strong | one unit per room |
+| Moving vs resting | Strong | motion energy |
+| Breathing present + steady | Moderate | only when the person is still; best while sleeping. Skipped when moving — motion already proves life |
+| Fall | To prove on hardware | physics is sound; must be verified on a real device before trusted |
+
+**What it alerts on — only a real emergency:**
+- **Fall** — sudden motion spike, then dead stillness
+- **Breathing stops while a person is present** — they were there, the breathing signal dies = possible collapse
+
+**What v1 deliberately does NOT do:**
+- Count exact people — shows "someone," never "2 people" (WiFi sensing can't count cleanly)
+- Identify who — cannot tell Mom from Dad; no names, ever
+- Alert on an empty home — family travels; empty is shown calmly, never as alarm
+- Learn personal patterns — "unusual for this home" is v2, and only after real data earns it
+- Camera, audio, location, wearable — never
+
+**One product, not two personas.** Watchfulness is a setting — "Standard" by default, "Extra watchful" for recovery/overdose-risk homes (tighter thresholds, faster escalation). The caregiver never picks a "mode identity"; they install, glance, and optionally turn watchfulness up.
+
+---
+
 ## Full phase map
 
 | Phase | What | Status | Blocked on |
@@ -47,19 +82,20 @@ Green CI does not mean this is safe to deploy. The pipeline is built and wired. 
 | 4 | Resolve V1–V10, fix schemas, validate pipeline | Blocked | Phase 3 |
 | 5 | Label real events, run eval rig, set thresholds | Blocked | Phase 4 |
 | 6 | Clear validation gate, wire Calm mode end-to-end | Blocked | Phase 5 |
-| 7 | iOS app — three screens | Parallel with 4–5 |
+| 7 | Web app — caregiver view (web first) | Parallel | with Phase 4–6 |
 | 8 | Escalation state machine — push → call → emergency | Blocked | Phase 6 |
 | 9 | Layer 3: longitudinal drift | Blocked | weeks of real data |
 | 10 | Layer 4: LLM communication layer | Blocked | Phase 6 |
 | 11 | Guard mode (recovery / overdose risk) | Blocked | Phase 6 + field validation of Calm |
-| 12 | Ship Calm mode to one real home | Blocked | Phase 8 + eval targets met |
+| 12 | Ship Standard watchfulness to one real home | Blocked | Phase 8 + eval targets met |
+| 13 | Native iOS / Android apps | Blocked | Phase 7 web app proven in the field |
 
 ---
 
 ## Phase 1 — Ingestion + logging + raw store
 
 ### Vision
-Get every byte the puck ever emits onto disk, timestamped, validated, and queryable. Nothing downstream is trustworthy without this. This is the foundation.
+Get every byte the sensor unit ever emits onto disk, timestamped, validated, and queryable. Nothing downstream is trustworthy without this. This is the foundation.
 
 ### What was built
 - `edge/sources/mqtt_source.py` — connects to Mosquitto, auto-reconnects, streams typed `RawMessage` objects
@@ -93,10 +129,10 @@ All tagged `TODO(verify:V1–V10)` in `edge/ingestion/schemas.py`. Unresolvable 
 | V7 | `zones` — list[str]? dict? |
 | V8 | Message rate per topic |
 | V9 | QoS level, retained messages on reconnect |
-| V10 | `rssi` — per-puck or per-person? |
+| V10 | `rssi` — per-unit or per-person? |
 
 ### Exit criteria → Phase 3
-- Real puck connects to local Mosquitto
+- Real sensor unit connects to local Mosquitto
 - `tools/inspect_stream.py` prints topics and payloads
 - `tools/log_harness.py` writes growing JSONL to `data/logs/`
 - Schema models updated with real field names
@@ -241,7 +277,7 @@ You pick the row. The code never picks it for you.
 ## Phase 6 — Calm mode end-to-end
 
 ### Vision
-First time the full pipeline runs live: puck → ingestion → detection → fusion → escalation → caregiver notification. Calm mode only. One home. No Guard mode yet.
+First time the full pipeline runs live: sensor unit → ingestion → detection → fusion → escalation → caregiver notification. Calm mode only. One home. No Guard mode yet.
 
 ### What to build
 - `edge/escalation/` — state machine: `green → yellow → red`. Soft confirm on yellow (push with "All good?" reply). Escalation ladder: stronger push → phone call → emergency contact.
@@ -267,47 +303,61 @@ red     — likely emergency. Push alert → call → emergency contact.
 
 ---
 
-## Phase 7 — iOS app (three screens, nothing more)
+## Phase 7 — Web app (caregiver view, web first)
 
 ### Vision
-The monitored person never sees this app. The caregiver opens it once a week, checks the dot, closes it. That's the whole use case. Three screens. No dashboard, no feed, no graphs.
+The monitored person never sees this. The caregiver — often in another city or country — opens a web app and in two seconds knows their parent is okay. **Web first**, because anyone, anywhere, on any device, can open a link with no install. Native apps come later (Phase 13). The main screen is mostly one plain sentence — color is a secondary cue, never the only signal.
 
-### The three screens
+### The screens
 ```
-1. Home screen
-   — Green / yellow / red dot per monitored person
-   — One calm sentence: "Mom's home, breathing normal, last moved 8 min ago"
-   — Nothing else
+1. Home / status
+   — Pick which home (a caregiver may watch several)
+   — ONE plain sentence: "Everything looks normal" / "No one home right now"
+   — Time since last activity: "2m ago"
+   — Small color cue (calm / needs attention) as a SECONDARY signal
+   — Tap the activity line → per-room plain text:
+       "Living room — someone moving, breathing steady
+        Bedroom — quiet"
 
-2. Alert screen
-   — What happened, when
+2. Alert
+   — What happened, when, which room
    — Two actions: "I'll call them" / "All good (false alarm)"
    — "False alarm" tap = labeled training signal, captured to store
 
 3. Settings
    — Who gets alerts, emergency contacts
-   — Which rooms / pucks
+   — Which rooms / units
    — Quiet hours
-   — Mode: Calm or Guard
+   — Watchfulness: Standard (default) / Extra watchful
 ```
 
+### What v1 honestly shows
+- Presence per room — "someone," never a head count, never a name
+- Moving vs resting
+- Breathing steady — only when the person is still; skipped when moving
+- Empty home — shown calmly, never as an alert
+
+The plain sentence is written by the LLM from raw numbers (cosmetic translation only). If the LLM is down, the app falls back to the structured state. The LLM is never in the alert path.
+
 ### Setup flow
-1. Caregiver buys puck → ships to parent → parent plugs into USB (that's all they do)
-2. Caregiver opens app → "Add home" → pairs to puck's local broker via homekit/local IP
-3. App shows "Learning your home's normal — alerts go live in 1–2 weeks"
-4. After learning period, status goes live
+1. Caregiver buys the kit (2 units) → ships to parent → parent plugs into USB (that's all they do)
+2. Caregiver opens the web app → "Add home" → connects to that home's edge service
+3. App shows "Getting to know your home — status goes live shortly"
+4. Status goes live
 
 ### What to build
-- SwiftUI: iOS first, three screens only
-- WebSocket or SSE connection to edge service for real-time status
-- APNs push for alerts
-- Pairing flow (QR code or local network discovery)
+- Next.js / React PWA, mobile-first responsive
+- Real-time status via WebSocket / SSE from the edge service
+- Multi-home selector (one caregiver, many homes)
+- Web push for alerts
+- Pairing flow (add a home, connect to its edge service)
+- **Data layer stubbed and CLEARLY marked until real hardware feeds it** — no synthetic sensor values are ever presented as real. The screen can be built and seen before hardware; the data behind it stays honestly empty/stubbed until a real device feeds it.
 
 ### Exit criteria → Phase 8
-- App shows live green/yellow/red from real home
-- Alert screen receives and displays real push notification
+- Web app shows live status from one real home
+- Alert screen receives and displays a real web push
 - False alarm tap writes to store
-- Monitored person has not touched the app, logged in, or been filmed
+- Monitored person has not opened the app, logged in, or been filmed
 
 ---
 
@@ -381,14 +431,14 @@ The LLM's entire job is translation. It takes structured state from Layers 1–3
 
 ---
 
-## Phase 11 — Guard mode
+## Phase 11 — "Extra watchful" profile (internally: Guard mode)
 
 ### Vision
-Same hardware, different operating point. Higher sensitivity, faster escalation, shorter confirm window. Intended for households with overdose or recovery risk — a bathroom with abnormal stillness for 3 minutes is a different signal than the same stillness in a bedroom at 2pm.
+Not a separate persona or app — the **same product** with a tighter operating point the caregiver turns on in Settings. Higher sensitivity, faster escalation, shorter confirm window. Intended for households with overdose or recovery risk — a bathroom with abnormal stillness for 3 minutes is a different signal than the same stillness in a bedroom at 2pm. The caregiver flips one toggle; everything else is identical.
 
-### How it differs from Calm
-| Parameter | Calm | Guard |
-|-----------|------|-------|
+### How it differs from Standard
+| Parameter | Standard | Extra watchful |
+|-----------|----------|----------------|
 | Yellow threshold | Higher (fewer alarms) | Lower (catch more) |
 | Confirm window | Longer | Shorter |
 | Escalation speed | Slower | Faster |
@@ -436,7 +486,7 @@ cd project-shiva
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 docker compose up              # starts Mosquitto on :1883
-python tools/log_harness.py    # connect puck and start capturing
+python tools/log_harness.py    # connect sensor unit and start capturing
 pytest                         # 50 passing, mechanics only
 ```
 
@@ -452,7 +502,7 @@ The only permitted non-live data source is `ReplaySource` playing back real capt
 
 ## Definition of done (full product)
 
-- Real CSI from a real puck flows through ingestion → detection → fusion → escalation → app with no synthetic data anywhere on the live path
+- Real CSI from a real sensor unit flows through ingestion → detection → fusion → escalation → app with no synthetic data anywhere on the live path
 - Eval rig reports FNR/FPR/latency/calibration on labeled real events; thresholds set from those metrics
 - Killing the LLM API key leaves detection and alerting fully working
 - App shows honest green/yellow/red with plain-language status and exactly three screens
