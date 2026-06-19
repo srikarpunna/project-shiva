@@ -282,7 +282,7 @@ First time the full pipeline runs live: sensor unit → ingestion → detection 
 ### What to build
 - `edge/escalation/` — state machine: `green → yellow → red`. Soft confirm on yellow (push with "All good?" reply). Escalation ladder: stronger push → phone call → emergency contact.
 - Wire `DetectorService` → `FusionService` → escalation in the ingestion service loop
-- APNs push integration for iOS alerts
+- Web push integration for caregiver alerts (native APNs/FCM deferred to Phase 13)
 - Twilio for SMS/voice call escalation
 
 ### Escalation state machine
@@ -470,7 +470,8 @@ project-shiva/
 ├── intelligence/           # off-hot-path: never in alert path
 │   ├── drift/              # [Phase 9] Layer 3: longitudinal change
 │   └── llm/                # [Phase 10] Layer 4: status → plain language
-├── app-ios/                # [Phase 7] SwiftUI: Home / Alert / Settings
+├── app-web/                # [Phase 7] Next.js/React PWA: Status / Alert / Settings
+├── app-native/             # [Phase 13] iOS / Android — after web proven
 ├── tools/                  # log_harness, inspect_stream, label_cli, clear_validation
 ├── config/                 # typed config, per-home overrides
 └── tests/                  # 50 tests today, all mechanics-only
@@ -505,7 +506,7 @@ The only permitted non-live data source is `ReplaySource` playing back real capt
 - Real CSI from a real sensor unit flows through ingestion → detection → fusion → escalation → app with no synthetic data anywhere on the live path
 - Eval rig reports FNR/FPR/latency/calibration on labeled real events; thresholds set from those metrics
 - Killing the LLM API key leaves detection and alerting fully working
-- App shows honest green/yellow/red with plain-language status and exactly three screens
+- Web app shows an honest plain-language status sentence (color a secondary cue) across its three screens
 - Calm and Guard modes are real, distinct, config-driven operating points
 - Every alert decision is reconstructable from structured logs alone
 - Nothing in code or copy implies medical-grade accuracy
