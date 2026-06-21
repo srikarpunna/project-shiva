@@ -131,6 +131,8 @@ All tagged `TODO(verify:V1–V10)` in `edge/ingestion/schemas.py`. Unresolvable 
 | V9 | QoS level, retained messages on reconnect |
 | V10 | `rssi` — per-unit or per-person? |
 
+> **Note (post-hardware):** these were framed for an MQTT/topic transport. Real hardware streams **UDP binary packets, not MQTT topics** (see Phase 3 "Hardware-verified reality"). The questions that still matter are now about **byte layouts of the UDP packet types**, not topic names. The MQTT ingestion path is kept in the tree but superseded by `tools/udp_capture.py` for capture.
+
 ### Exit criteria → Phase 3
 - Real sensor unit connects to local Mosquitto
 - `tools/inspect_stream.py` prints topics and payloads
@@ -182,41 +184,68 @@ Nothing yet. Calibrator and eval rig require real labeled data. They will raise 
 This is the most important phase in the project. Not because it's technically complex — it isn't — but because everything before it is an educated guess about the real world and everything after it is grounded in reality. The goal is one thing: real CSI flowing to disk.
 
 ### What's needed
-- **ESP32-S3-DevKitC-1** (N8R8 or N16R8) — ~$12. The CSI sensing node.
-- **Seeed SenseCAP MR60BHA2** mmWave module — ~$40. Needed for breathing rate reliability in Guard mode.
-- RuView Docker container running locally: `docker run ruvnet/wifi-densepose --source esp32 --mqtt`
-- Local Mosquitto broker (already in `docker-compose.yml`)
+- **ESP32-S3-DevKitC-1 N16R8** (16MB flash / 8MB PSRAM) — ~$8–12. The CSI sensing node. (N8R8 also works.)
+- A **data-capable USB-C cable** plugged **directly into the Mac** (not through a dock/hub). A charge-only cable powers the board but gives no serial — the board won't enumerate.
+- **RuView firmware** `esp32-csi-node` from repo **[ruvnet/RuView](https://github.com/ruvnet/RuView)** (renamed from `ruvnet/wifi-densepose`). Pre-built S3 binaries live in `firmware/esp32-csi-node/release_bins/`.
+- Host tools: `pip install --user esptool esp-idf-nvs-partition-gen pyserial`.
+- The Mac and the board must share the same **2.4 GHz** WiFi (ESP32-S3 is 2.4 GHz only).
+- *(Optional, later)* **Seeed SenseCAP MR60BHA2** mmWave module — ~$40 — if real CSI proves too weak for breathing in "Extra watchful".
 
-### Day-one sequence
+> **⚠️ Hardware-verified reality (2026-06-21) — corrects the pre-hardware plan**
+> The original plan assumed RuView published over **MQTT**. On real hardware it does not.
+> The `esp32-csi-node` firmware **streams UDP datagrams to an aggregator IP on port 5005** —
+> no broker, no topics. The earlier MQTT pipeline (`mqtt_source.py`, `log_harness.py`,
+> `inspect_stream.py`, the V1–V10 *topic* questions) is therefore **superseded for ingestion**;
+> the real capture path is `tools/udp_capture.py`. Packet types seen on the wire (little-endian
+> magic in first 4 bytes):
+>
+> | Magic | Meaning | Rate | Status |
+> |-------|---------|------|--------|
+> | `0xC5110001` | Raw CSI frame (header + per-subcarrier I/Q; 1 ant × 64 subcarriers seen) | ~9–20 Hz, rises with motion | documented |
+> | `0xC5110002` | Vitals (presence, breathing, heart rate, fall flag) — **vendor's own guess, a hint not ground truth** | 1 Hz | documented |
+> | `0xC5110003` / `0xC5110006` / `0xC511A110` / `0xC5118100` | undocumented in v0.6.x | varies | **TODO: decode** |
+
+### Day-one sequence (what was actually run)
 ```bash
-# 1. Start broker
-docker compose up
+# 0. Get firmware repo
+git clone --depth 1 https://github.com/ruvnet/RuView.git vendor/RuView
+B=vendor/RuView/firmware/esp32-csi-node/release_bins
 
-# 2. Connect board, run RuView container (see RuView docs for exact flags)
-docker run ruvnet/wifi-densepose --source esp32 --mqtt mqtt://localhost:1883
+# 1. Confirm Mac sees the board (must show /dev/cu.usbmodem* — native USB, no driver)
+ls /dev/cu.*
 
-# 3. Resolve all unknowns in 60 seconds
-python tools/inspect_stream.py --broker localhost --duration 60
+# 2. Flash the S3 CSI firmware (overwrites factory demo; reversible)
+python3 -m esptool --chip esp32s3 --port /dev/cu.usbmodemXXXX --baud 460800 \
+  write_flash --flash_mode dio --flash_size 8MB \
+  0x0     $B/bootloader.bin \
+  0x8000  $B/partition-table.bin \
+  0xf000  $B/ota_data_initial.bin \
+  0x20000 $B/esp32-csi-node.bin
 
-# 4. Fix schemas with real topic names
-# Edit edge/ingestion/schemas.py — update TOPIC_SCHEMA_MAP keys
+# 3. Provision WiFi + this Mac's IP as the aggregator (stored on board, stays local)
+python3 vendor/RuView/firmware/esp32-csi-node/provision.py \
+  --port /dev/cu.usbmodemXXXX --chip esp32s3 \
+  --ssid "YOUR_WIFI" --password "YOUR_PASS" \
+  --target-ip <this-mac-ip> --target-port 5005 --node-id 1
 
-# 5. Start capturing
-python tools/log_harness.py --broker localhost --out data/logs/
+# 4. Watch it connect + stream (serial @115200): look for "CSI streaming active"
+python3 -m serial.tools.miniterm /dev/cu.usbmodemXXXX 115200
 
-# 6. Verify pipeline end-to-end
-python -m edge.ingestion.service
-curl localhost:8000/health
+# 5. Capture real CSI to disk -> data/csi_raw/csi_*.jsonl  (gitignored, stays local)
+python3 tools/udp_capture.py --duration 60
 ```
 
 ### The only test that matters on day one
-Breathe slowly while watching `inspect_stream.py` output. Does `breathing_rate` change? If yes, the sensor is working. If no, stop and debug before proceeding.
+Run `tools/udp_capture.py` and **wave a hand near the board.** The `0xC5110001` (raw CSI)
+packets-per-second should climb and the firmware serial log shows `presence`/`motion` jump
+from `0.00` to non-zero. If the numbers respond to a body, the physics works. If nothing
+moves, stop and debug before proceeding.
 
 ### Exit criteria → Phase 4
-- At least 24 hours of continuous real logs in `data/logs/`
-- No schema errors in ingestion service logs
-- `breathing_rate` observed to respond to real breathing
-- `fall` event observed at least once (controlled test: simulate a fall)
+- ✅ **Done 2026-06-21:** firmware flashed, board on WiFi, real CSI captured to `data/csi_raw/` (`tools/udp_capture.py`); presence/motion proven to respond to a real body.
+- Decode the undocumented packet types and the `0xC5110001` / `0xC5110002` byte layouts.
+- A labeled corpus: timed captures of empty / still / walking / lying-still(breathing), each labeled, for the eval rig.
+- A `fall` event captured at least once (controlled test).
 
 ---
 
@@ -472,7 +501,9 @@ project-shiva/
 │   └── llm/                # [Phase 10] Layer 4: status → plain language
 ├── app-web/                # [Phase 7] Next.js/React PWA: Status / Alert / Settings
 ├── app-native/             # [Phase 13] iOS / Android — after web proven
-├── tools/                  # log_harness, inspect_stream, label_cli, clear_validation
+├── tools/                  # udp_capture (real CSI→disk), log_harness*, inspect_stream*, label_cli, clear_validation   (*MQTT-era, superseded)
+├── vendor/RuView/          # cloned firmware repo (ruvnet/RuView) — esp32-csi-node binaries + provision.py
+├── data/csi_raw/           # captured real CSI .jsonl (gitignored — never leaves the machine)
 ├── config/                 # typed config, per-home overrides
 └── tests/                  # 50 tests today, all mechanics-only
 ```
@@ -486,9 +517,11 @@ git clone <repo>
 cd project-shiva
 python3.11 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-docker compose up              # starts Mosquitto on :1883
-python tools/log_harness.py    # connect sensor unit and start capturing
 pytest                         # 50 passing, mechanics only
+
+# Real CSI capture (hardware path — see Phase 3 for flashing + provisioning):
+pip install --user esptool esp-idf-nvs-partition-gen pyserial
+python tools/udp_capture.py    # listens UDP :5005, writes data/csi_raw/*.jsonl
 ```
 
 ---
