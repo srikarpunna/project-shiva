@@ -78,8 +78,8 @@ Everything below is the **intended** v1 capability. None of it is proven until r
 |-------|------|--------|-----------|
 | 1 | Ingestion + logging + raw store | **Done** | — |
 | 2 | Layer 1 + Layer 2 scaffolding + eval rig | **Done** | — |
-| 3 | Hardware + real signal on disk | **Next** | ESP32-S3 board arriving |
-| 4 | Resolve V1–V10, fix schemas, validate pipeline | Blocked | Phase 3 |
+| 3 | Hardware + real signal on disk | **Done 2026-06-21** | board flashed, real CSI captured |
+| 4 | Resolve V1–V10, fix schemas, validate pipeline | **In progress** — V1–V10 answered (decoded firmware); labeled corpus building | Phase 3 |
 | 5 | Label real events, run eval rig, set thresholds | Blocked | Phase 4 |
 | 6 | Clear validation gate, wire Calm mode end-to-end | Blocked | Phase 5 |
 | 7 | Web app — caregiver view (web first) | Parallel | with Phase 4–6 |
@@ -115,23 +115,49 @@ docker compose up          # starts local Mosquitto broker
 python tools/log_harness.py --broker localhost
 ```
 
-### Open unknowns (TODO(verify))
-All tagged `TODO(verify:V1–V10)` in `edge/ingestion/schemas.py`. Unresolvable without real hardware:
+### V1–V10 — ANSWERED from decoded firmware (2026-06-21)
+These were MQTT-era guesses. On real hardware the transport is **UDP binary packets on
+:5005, not MQTT topics**, and every packet layout was decoded from the firmware C structs
+(`vendor/RuView/firmware/esp32-csi-node/main/`) and verified against a real capture with
+`tools/decode_csi.py`. The questions are now resolved facts, not open unknowns:
 
-| ID | Question |
-|----|----------|
-| V1 | Exact MQTT topic namespace from RuView |
-| V2 | `presence` — bool or enum string? |
-| V3 | `person_count` — int/float? sentinel for unknown? |
-| V4 | `breathing_rate` units and null sentinel |
-| V5 | `heart_rate` — exists in firmware? separate topic? |
-| V6 | `fall` — edge event or sustained state? |
-| V7 | `zones` — list[str]? dict? |
-| V8 | Message rate per topic |
-| V9 | QoS level, retained messages on reconnect |
-| V10 | `rssi` — per-unit or per-person? |
+| ID | Original question | Answer (from firmware) |
+|----|----|----|
+| V1 | MQTT topic namespace | **N/A — no MQTT.** UDP :5005; packets keyed by 4-byte little-endian magic. |
+| V2 | `presence` bool/enum? | Vendor `flags` bit0 in vitals (`0xC5110002`). **Unreliable** (reported "empty" with 2 people present). We compute our own. |
+| V3 | `person_count` type? | Vendor `n_persons` u8. **Junk — frozen constant 4.** No real count exists in firmware; **we must build it (roadmap L5).** |
+| V4 | `breathing_rate` units / null? | `breathing_rate` u16 = **BPM × 100** (fixed-point). `heartrate` u32 = BPM × 10000. No null sentinel; 0 = none. |
+| V5 | `heart_rate` exists? | Yes — vitals `heartrate` + feature_state `heartbeat_bpm`. **CSI HR unreliable on 1 node — out of v1 scope.** |
+| V6 | `fall` edge/sustained? | `flags` bit1. Firmware enforces a **5000 ms cooldown** → debounced **edge event**, not sustained. |
+| V7 | `zones` / rooms? | **No zone field.** A room = **which node** (`node_id`). One board per room = that room's sensor. |
+| V8 | message rate? | Measured: raw CSI ~9–20 Hz, feature_state ~5 Hz, vitals 1 Hz, feature_vec 1 Hz. |
+| V9 | QoS / retained? | **N/A — UDP.** No QoS, no retain, no replay. Packets can drop — plan for loss. |
+| V10 | `rssi` per-unit/person? | **Per-node** (CSI header + vitals `rssi`). Signal-quality, not per-person. |
 
-> **Note (post-hardware):** these were framed for an MQTT/topic transport. Real hardware streams **UDP binary packets, not MQTT topics** (see Phase 3 "Hardware-verified reality"). The questions that still matter are now about **byte layouts of the UDP packet types**, not topic names. The MQTT ingestion path is kept in the tree but superseded by `tools/udp_capture.py` for capture.
+> The vendor *derived* layer (presence/count/vitals in `0002`/`0003`/`0006`) is a **hint, not
+> ground truth** — it failed the 2-person test (said "empty", counted "4"). We build our own
+> detector on the **raw CSI** (`0xC5110001`) and validate against labeled captures. Full packet
+> layouts: `docs/HARDWARE_BRINGUP.md`.
+
+### Roadmap — layered by life-safety (build order)
+
+Goal: **per room — is someone there, how many, did they fall, did breathing stop → alert.**
+Built in order of life-safety value; counting is real but last and coarse on this hardware.
+
+| Layer | Goal | Hardness | Hardware |
+|----|----|----|----|
+| **L0** ✅ | Raw CSI capture + labeled corpus | done | 1 node |
+| **L1** | Presence per room (someone here?) | easy | 1 node/room |
+| **L2** | **Fall detection** | medium | 1 node/room |
+| **L3** | **Breathing + breathing-stops-while-present → ALERT** | medium-hard | 1 node/room |
+| **L4** | Per-room routing (which room the event is in) | easy | 1 node/room |
+| **L5** | **People count per room (coarse 0 / 1 / 2+)** | **hardest** | wants a mesh per room |
+
+**L1–L4 = the life-safety core** (fall + breathing-stop alert) — ship reliable first.
+**L5 (count)** is in scope but last: a single $9 / 1-antenna / 64-subcarrier node cannot count;
+it needs multiple nodes per room + a count-labeled corpus, and stays **coarse (0/1/2+), not exact**.
+With **3 boards** the tradeoff is: 3 rooms × 1 node (great presence/fall/breathing, weak count) **or**
+1 room × 3 nodes (attempt real count, that room only). More boards needed to count every room.
 
 ### Exit criteria → Phase 3
 - Real sensor unit connects to local Mosquitto
