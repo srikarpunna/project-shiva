@@ -35,15 +35,23 @@ The firmware **streams UDP datagrams to an aggregator IP on port 5005** — no b
 The MQTT ingestion path (`mqtt_source.py`, `log_harness.py`, `inspect_stream.py`, the V1–V10
 *topic* questions) is **superseded for capture** by `tools/udp_capture.py`.
 
-### UDP packet types seen on the wire (little-endian magic = first 4 bytes)
-| Magic | Meaning | Rate | Status |
-|-------|---------|------|--------|
-| `0xC5110001` | Raw CSI frame — header (node/ant/subcarrier/freq/seq/rssi/noise) + per-subcarrier I/Q. Seen: 1 antenna × 64 subcarriers, freq 2437 MHz (ch 6). | ~9–20 Hz, **rises with motion** | documented |
-| `0xC5110002` | Vitals — presence, breathing, heart rate, fall flag. **Vendor's own guess: a hint, NOT ground truth.** | 1 Hz | documented |
-| `0xC5110003` | undocumented | ~1 Hz | **TODO: decode** |
-| `0xC5110006` | undocumented, ~60 B | ~5 Hz | **TODO: decode** |
-| `0xC511A110` | undocumented | sparse | **TODO: decode** |
-| `0xC5118100` | undocumented | sparse | **TODO: decode** |
+### UDP packet types — DECODED from firmware C structs (2026-06-21)
+All layouts transcribed from `vendor/RuView/firmware/esp32-csi-node/main/`
+(`csi_collector.{c,h}`, `edge_processing.h`, `rv_feature_state.h`, `rv_mesh.h`),
+verified by parsing the real capture with `tools/decode_csi.py`. Little-endian.
+
+| Magic | Meaning | Bytes | Rate | Sensing? |
+|-------|---------|-------|------|----------|
+| `0xC5110001` | **Raw CSI frame.** 20B header (node, n_ant, n_sub, freq, seq, rssi, noise, ppdu, flags-bit4=sync) + int8 I/Q pairs. Real: 1 ant × 64 sub, 2437 MHz (ch6), 148 B. | 148 | ~9–20 Hz, **rises with motion** | ✅ **our detector input** |
+| `0xC5110002` | **Vitals.** flags bit0=presence/1=fall/2=motion; breathing=BPM×100; heartrate=BPM×10000; rssi; n_persons; motion_energy f32; presence_score f32; ts_ms. **Vendor hint, NOT ground truth.** | 32 | 1 Hz | hint only |
+| `0xC5110003` | **Feature vector** — node, seq, ts_us, `features[8]` f32. Vendor-derived. | 48 | ~1 Hz | hint only |
+| `0xC5110006` | **Feature state** — motion/presence/respiration/heartbeat/anomaly/env_shift/coherence scores + quality_flags + crc32(IEEE, [0..end-4]). Vendor-derived. | 60 | ~5 Hz | hint only |
+| `0xC5110004` | Fused vitals (CSI+mmWave). Only emitted if mmWave board attached — **not seen.** | 48 | — | n/a |
+| `0xC5110005` | Compressed CSI (reassigned from old 0003). | var | — | n/a |
+| `0xC511A110` | **C6 mesh time-sync** — leader/epoch/local µs. **Plumbing, not sensing.** | 32 | sparse | ignore |
+| `0xC5118100` | **Mesh envelope** — node health/status/role. **Plumbing, not sensing.** | var | sparse | ignore |
+
+Decode + inspect: `python tools/decode_csi.py data/csi_raw/csi_*.jsonl --magic 0xc5110002`
 
 ## Capture tool
 `tools/udp_capture.py` — binds UDP `:5005`, writes every packet losslessly
@@ -65,7 +73,9 @@ python3 tools/udp_capture.py --duration 10   # wave a hand near the board while 
 - **No synthetic data, ever.** No video, no audio, no location tracking.
 
 ## Next steps
-1. Decode the undocumented packet types + the `0xC5110001` / `0xC5110002` byte layouts.
+1. ~~Decode packet types~~ ✅ done 2026-06-21 — all 8 magics decoded (`tools/decode_csi.py`).
 2. Build a labeled corpus: timed captures of empty / still / walking / lying-still(breathing),
    each labeled, for the eval rig.
 3. Capture a controlled `fall` at least once.
+4. Build OUR presence/breathing detector on the raw CSI (`0xC5110001`); validate against the
+   labeled corpus — never against the vendor vitals (`0002`/`0003`/`0006`), which are hints.
