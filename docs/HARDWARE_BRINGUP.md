@@ -53,6 +53,31 @@ verified by parsing the real capture with `tools/decode_csi.py`. Little-endian.
 
 Decode + inspect: `python tools/decode_csi.py data/csi_raw/csi_*.jsonl --magic 0xc5110002`
 
+## Tools (all real-data-only, no synthetic)
+- `tools/udp_capture.py` — raw capture to `data/csi_raw/`.
+- `tools/decode_csi.py` — parse a capture by magic into typed records (all 8 magics).
+- `tools/capture_labeled.py` — timed session with a **human-asserted ground-truth label** →
+  `data/csi_labeled/<label>/` + appends `manifest.jsonl`.
+- `tools/live_view.py` — tails an in-progress capture **file** (not the socket) and renders a
+  live dashboard; runs alongside a capture without fighting for UDP :5005.
+
+## Labeled corpus (started 2026-06-21)
+| label | runs | notes |
+|-------|------|-------|
+| `occupied` | 1 | 180 s, 2686 pkts (1373 raw CSI). 2 people calm (phone + typing). |
+| `empty` | 0 | **NEEDED — most important negative; empty home must never alert.** |
+| `breathing` | 0 | solo, low-motion. |
+| `walking` | 0 | motion positive. |
+| `fall` | 0 | controlled, once. |
+
+Eval rig is blocked until ≥2 contrasting classes exist (esp. `empty` vs `occupied`).
+
+**Vendor derived layer fails the 2-person test:** across the `occupied` capture the vendor
+`n_persons` read a constant **4** and the `presence` flag said "empty" in 161/165 packets — with
+two people present. One 1-antenna/64-subcarrier ESP32 cannot count people, and we never count
+anyway (location-based "someone", not numbers). We build OUR detector on the **raw CSI** and
+validate against these labels — never against vendor vitals.
+
 ## Capture tool
 `tools/udp_capture.py` — binds UDP `:5005`, writes every packet losslessly
 (`ts_ms`, `seq`, `src`, `magic`, `len`, `payload_b64`) to `data/csi_raw/csi_*.jsonl`.
