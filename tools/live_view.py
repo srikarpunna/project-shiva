@@ -47,54 +47,24 @@ def newest_capture() -> Path | None:
     return max(files, key=lambda f: f.stat().st_mtime) if files else None
 
 
-def bar(x: float, lo: float, hi: float, width: int = 20) -> str:
-    if hi <= lo:
-        return " " * width
-    frac = max(0.0, min(1.0, (x - lo) / (hi - lo)))
-    n = int(frac * width)
-    return "█" * n + "·" * (width - n)
-
-
-def render(path: Path, state: dict, rates: dict) -> None:
-    sys.stdout.write("\033[2J\033[H")  # clear + home
-    print(f"  LIVE  {path.name}")
-    print(f"  (vendor hints — NOT ground truth, NOT our detector)\n")
-
-    print("  packet rate (last ~1s):")
-    for name in ("raw_csi", "vitals", "feature_state", "feature_vec",
-                 "c6_timesync", "mesh_envelope"):
-        r = rates.get(name, 0)
-        if r:
-            print(f"    {name:>15}  {r:>3}/s")
-    print()
-
+def render(state: dict, rate_total: int, stale: bool) -> None:
+    """One self-overwriting line. No screen clear — never smears."""
     csi = state.get("raw_csi", {})
-    if csi:
-        amp = csi.get("amp_mean", 0)
-        rssi = csi.get("rssi", 0)
-        print(f"  RAW CSI    amp {amp:6.2f}  [{bar(amp, 0, 40)}]")
-        print(f"             rssi {rssi:>4} dBm   sub {csi.get('n_subcarriers','?')}  "
-              f"{csi.get('freq_mhz','?')}MHz")
-    print()
-
     v = state.get("vitals", {})
+    amp = csi.get("amp_mean", 0.0)
+    rssi = csi.get("rssi", 0)
+    vend = "?"
     if v:
-        pres = "PRESENT" if v.get("presence") else "  empty"
-        fall = "  FALL!" if v.get("fall") else ""
-        mot = v.get("motion_energy", 0)
-        print(f"  vitals     {pres}{fall}   persons {v.get('n_persons','?')}")
-        print(f"             motion {mot:6.2f}  [{bar(mot, 0, 10)}]")
-        print(f"             breathing {v.get('breathing_bpm',0):5.1f} bpm   "
-              f"hr {v.get('heartrate_bpm',0):5.1f} bpm")
-
-    fs = state.get("feature_state", {})
-    if fs:
-        print(f"  feat_state presence {fs.get('presence_score',0):5.2f}  "
-              f"motion {fs.get('motion_score',0):4.2f}  "
-              f"resp {fs.get('respiration_bpm',0):5.1f}  "
-              f"coherence {fs.get('node_coherence',0):4.2f}")
-
-    print(f"\n  Ctrl-C to stop view (capture keeps running).")
+        vend = ("present" if v.get("presence") else "empty")
+        if v.get("fall"):
+            vend += "+FALL"
+    flag = "STALE(capture ended?)" if stale else f"{rate_total:>3} pkt/s"
+    # OURS: deliberately blank — our detector is not built yet (roadmap L1).
+    line = (f"\r{flag} | CSI amp {amp:5.1f} rssi {rssi:>4} | "
+            f"vendor[hint]: {vend:<10} mot {v.get('motion_energy',0):5.1f} "
+            f"br {v.get('breathing_bpm',0):4.1f} | OURS: not-built(L1)   ")
+    sys.stdout.write(line[:160])
+    sys.stdout.flush()
 
 
 def main() -> None:
@@ -112,8 +82,12 @@ def main() -> None:
         print(f"No such file: {path}", file=sys.stderr)
         sys.exit(1)
 
+    print(f"  live view: {path.name}")
+    print("  vendor[hint] = firmware guess, NOT ground truth. OURS = our detector (not built yet, L1).\n")
+
     state: dict[str, dict] = {}
-    recent = deque(maxlen=400)  # (ts, type) for rate calc
+    recent = deque(maxlen=400)  # ts of each packet for rate calc
+    last_data = time.time()
     fh = path.open()
     fh.seek(0, 2)  # start at end — show live, not history
     last_render = 0.0
@@ -125,26 +99,22 @@ def main() -> None:
             else:
                 try:
                     raw = json.loads(line)
-                    data = base64.b64decode(raw["payload_b64"])
-                    rec = decode_packet(data)
+                    rec = decode_packet(base64.b64decode(raw["payload_b64"]))
                 except (json.JSONDecodeError, KeyError, ValueError):
                     continue
-                t = rec.get("type", "unknown")
-                state[t] = rec
-                recent.append((time.time(), t))
+                state[rec.get("type", "unknown")] = rec
+                recent.append(time.time())
+                last_data = time.time()
 
             now = time.time()
             if now - last_render >= 0.5:
                 cutoff = now - 1.0
-                rates: dict[str, int] = {}
-                for ts, t in recent:
-                    if ts >= cutoff:
-                        rates[t] = rates.get(t, 0) + 1
-                render(path, state, rates)
+                rate_total = sum(1 for ts in recent if ts >= cutoff)
+                stale = (now - last_data) > 3.0
+                render(state, rate_total, stale)
                 last_render = now
     except KeyboardInterrupt:
-        sys.stdout.write("\033[2J\033[H")
-        print("view stopped. capture still running.")
+        print("\nview stopped. capture (if any) still running.")
 
 
 if __name__ == "__main__":
